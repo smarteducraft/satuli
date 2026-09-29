@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>AI 방언 판별기 - 음성 녹음</title>
+  <style>
+    :root{--p:#3859e8;--text:#1f2937;--muted:#687386;--line:#e5e9f0;--bg:#f5f7fb;--danger:#d92d20}
+    *{box-sizing:border-box}body{margin:0;background:linear-gradient(180deg,#eef3ff,#f7f9fc);font-family:Pretendard,"Noto Sans KR",system-ui,sans-serif;color:var(--text)}
+    .wrap{width:min(520px,calc(100% - 24px));margin:0 auto;padding:24px 0 32px}.card{background:#fff;border:1px solid var(--line);border-radius:22px;padding:23px;box-shadow:0 16px 45px rgba(26,38,70,.1)}
+    h1{font-size:24px;margin:0 0 7px;letter-spacing:-.04em}.sub{font-size:13px;color:var(--muted);line-height:1.6;margin:0}.prompt{margin:18px 0;background:#f4f6ff;border:1px solid #dfe5ff;border-radius:15px;padding:14px;line-height:1.55;font-size:14px}.prompt b{display:block;font-size:12px;color:#5d6aa8;margin-bottom:5px}
+    .orb{width:122px;height:122px;margin:22px auto 12px;border-radius:50%;display:grid;place-items:center;font-size:45px;background:#f1f4ff;border:1px solid #dde4ff;box-shadow:inset 0 0 0 10px #f9faff}.orb.rec{background:#fff0f0;border-color:#ffcfcf;animation:pulse 1s infinite}@keyframes pulse{50%{box-shadow:0 0 0 16px rgba(217,45,32,0),inset 0 0 0 10px #fff8f8}0%,100%{box-shadow:0 0 0 0 rgba(217,45,32,.13),inset 0 0 0 10px #fff8f8}}
+    .timer{text-align:center;font-size:34px;font-weight:900;letter-spacing:.02em}.status{text-align:center;color:var(--muted);font-size:13px;min-height:40px;line-height:1.5;margin-top:4px}.meter{height:10px;background:#edf0f5;border-radius:99px;overflow:hidden;margin:14px 0 18px}.meter i{display:block;height:100%;width:3%;background:linear-gradient(90deg,#5f77ed,#9b6de8);border-radius:99px;transition:width .08s}
+    .actions{display:flex;gap:10px}.btn{flex:1;border:0;border-radius:14px;padding:13px 14px;font-weight:800;cursor:pointer}.start{background:linear-gradient(135deg,#3859e8,#6f7cf0);color:#fff}.stop{background:#f0f2f6;color:#3c4657}.send{background:#151b2b;color:#fff;width:100%;margin-top:10px}.btn:disabled{opacity:.4;cursor:not-allowed}
+    audio{width:100%;margin-top:15px;display:none}.hint{margin-top:16px;font-size:12px;line-height:1.55;color:#7a6471;background:#fff7fa;border:1px solid #f3dfe7;padding:11px 12px;border-radius:12px}.error{display:none;margin-top:12px;color:#8c241b;background:#fff4f2;border:1px solid #f5cdc8;padding:11px;border-radius:12px;font-size:13px;line-height:1.5}
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <section class="card">
+      <h1>🎙️ 음성 녹음</h1>
+      <p class="sub">평소 말투로 자연스럽게 1~2문장 말해 주세요.</p>
+      <div class="prompt"><b>말하기 상황</b><span id="promptText">자유롭게 말해 보세요.</span></div>
+
+      <div id="orb" class="orb">🎤</div>
+      <div id="timer" class="timer">00:00</div>
+      <div id="status" class="status">녹음 시작 버튼을 누르면 브라우저가 마이크 권한을 요청합니다.</div>
+      <div class="meter"><i id="meterBar"></i></div>
+
+      <div class="actions">
+        <button id="startBtn" class="btn start" type="button">● 녹음 시작</button>
+        <button id="stopBtn" class="btn stop" type="button" disabled>■ 녹음 종료</button>
+      </div>
+      <audio id="preview" controls></audio>
+      <button id="sendBtn" class="btn send" type="button" disabled>✓ 이 음성 사용하기</button>
+      <div id="error" class="error"></div>
+      <div class="hint">이 창은 마이크 녹음만 담당합니다. 녹음한 음성은 원래 AI 분석 화면으로 전달되며, 이 페이지 자체는 서버에 음성을 저장하지 않습니다.</div>
+    </section>
+  </main>
+
+<script>
+(() => {
+  const qs = new URLSearchParams(location.search);
+  const sessionId = qs.get('session') || '';
+  const openerOrigin = qs.get('openerOrigin') || '*';
+  const maxSec = Math.min(25, Math.max(5, Number(qs.get('maxSec') || 25)));
+  const prompt = qs.get('prompt') || '자유롭게 1~2문장 말해 보세요.';
+
+  const startBtn = document.querySelector('#startBtn');
+  const stopBtn = document.querySelector('#stopBtn');
+  const sendBtn = document.querySelector('#sendBtn');
+  const preview = document.querySelector('#preview');
+  const orb = document.querySelector('#orb');
+  const timer = document.querySelector('#timer');
+  const status = document.querySelector('#status');
+  const errorBox = document.querySelector('#error');
+  const meterBar = document.querySelector('#meterBar');
+  document.querySelector('#promptText').textContent = prompt;
+
+  let stream = null, mediaRecorder = null, chunks = [], blob = null, objectUrl = '';
+  let startedAt = 0, clockId = null, autoStopId = null, audioCtx = null, analyser = null, rafId = null;
+
+  startBtn.addEventListener('click', startRecording);
+  stopBtn.addEventListener('click', stopRecording);
+  sendBtn.addEventListener('click', sendToOpener);
+
+  async function startRecording(){
+    clearError();
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      showError('이 브라우저에서는 마이크 녹음을 사용할 수 없습니다. Chrome 또는 Edge 최신 버전을 사용해 주세요.');
+      return;
+    }
+    if (!window.MediaRecorder) {
+      showError('이 브라우저는 MediaRecorder를 지원하지 않습니다.');
+      return;
+    }
+
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}, video:false
+      });
+
+      const mime = chooseMimeType();
+      mediaRecorder = mime ? new MediaRecorder(stream,{mimeType:mime}) : new MediaRecorder(stream);
+      chunks = [];
+      blob = null;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      preview.style.display = 'none';
+      sendBtn.disabled = true;
+
+      mediaRecorder.addEventListener('dataavailable', e => { if (e.data && e.data.size) chunks.push(e.data); });
+      mediaRecorder.addEventListener('stop', onStopped, {once:true});
+      mediaRecorder.start(250);
+
+      startedAt = Date.now();
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      orb.classList.add('rec');
+      orb.textContent = '🔴';
+      status.textContent = '녹음 중입니다. 평소처럼 자연스럽게 말해 주세요.';
+      updateTimer();
+      clockId = setInterval(updateTimer, 200);
+      autoStopId = setTimeout(stopRecording, maxSec * 1000);
+      startMeter(stream);
+    } catch(err) {
+      showError(explainMicError(err));
+      cleanupStream();
+    }
+  }
+
+  function stopRecording(){
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+    if (clockId) clearInterval(clockId);
+    if (autoStopId) clearTimeout(autoStopId);
+    clockId = autoStopId = null;
+    stopMeter();
+    stopBtn.disabled = true;
+  }
+
+  function onStopped(){
+    const type = (mediaRecorder && mediaRecorder.mimeType) || (chunks[0] && chunks[0].type) || 'audio/webm';
+    blob = new Blob(chunks,{type});
+    cleanupStream();
+
+    if (!blob.size) {
+      showError('녹음된 음성이 없습니다. 다시 시도해 주세요.');
+      startBtn.disabled = false;
+      return;
+    }
+
+    objectUrl = URL.createObjectURL(blob);
+    preview.src = objectUrl;
+    preview.style.display = 'block';
+    startBtn.disabled = false;
+    sendBtn.disabled = false;
+    orb.classList.remove('rec');
+    orb.textContent = '✅';
+    const sec = Math.max(.1,(Date.now()-startedAt)/1000);
+    status.textContent = '녹음 완료 (' + sec.toFixed(1) + '초). 재생해 보고 이 음성 사용하기를 눌러 주세요.';
+  }
+
+  function sendToOpener(){
+    if (!blob) return;
+    if (!window.opener || window.opener.closed) {
+      showError('원래 AI 분석 창을 찾을 수 없습니다. 분석 창을 다시 연 뒤 녹음해 주세요.');
+      return;
+    }
+
+    sendBtn.disabled = true;
+    status.textContent = '음성을 분석 화면으로 보내는 중...';
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = String(reader.result || '');
+      const base64 = dataUrl.split(',')[1] || '';
+      const message = {
+        type:'DIALECT_AUDIO',
+        sessionId,
+        audioBase64:base64,
+        mimeType:blob.type || 'audio/webm',
+        durationMs:Math.max(0,Date.now()-startedAt)
+      };
+      try {
+        window.opener.postMessage(message, openerOrigin || '*');
+        status.textContent = '전달 완료! 이 창은 닫아도 됩니다.';
+        setTimeout(() => window.close(), 650);
+      } catch(e) {
+        showError('음성을 전달하지 못했습니다: ' + e.message);
+        sendBtn.disabled = false;
+      }
+    };
+    reader.onerror = () => { showError('녹음 데이터를 읽지 못했습니다.'); sendBtn.disabled = false; };
+    reader.readAsDataURL(blob);
+  }
+
+  function chooseMimeType(){
+    const candidates = [
+      'audio/webm;codecs=opus',
+      'audio/webm',
+      'audio/ogg;codecs=opus',
+      'audio/mp4'
+    ];
+    return candidates.find(x => MediaRecorder.isTypeSupported(x)) || '';
+  }
+
+  function updateTimer(){
+    const ms = Math.max(0,Date.now()-startedAt);
+    const sec = Math.floor(ms/1000);
+    timer.textContent = '00:' + String(sec).padStart(2,'0');
+    if (sec >= maxSec) status.textContent = '최대 녹음 시간에 도달했습니다.';
+  }
+
+  function startMeter(s){
+    try {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const source = audioCtx.createMediaStreamSource(s);
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 256;
+      source.connect(analyser);
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      const draw = () => {
+        if (!analyser) return;
+        analyser.getByteFrequencyData(data);
+        let sum = 0; for (const v of data) sum += v;
+        const avg = sum / data.length;
+        meterBar.style.width = Math.max(3,Math.min(100,avg*1.3)) + '%';
+        rafId = requestAnimationFrame(draw);
+      };
+      draw();
+    } catch(e) {}
+  }
+
+  function stopMeter(){
+    if (rafId) cancelAnimationFrame(rafId);
+    rafId = null; analyser = null; meterBar.style.width = '3%';
+    if (audioCtx) { audioCtx.close().catch(()=>{}); audioCtx=null; }
+  }
+
+  function cleanupStream(){
+    if (stream) stream.getTracks().forEach(t=>t.stop());
+    stream = null;
+  }
+
+  function explainMicError(err){
+    const name = err && err.name || '';
+    if (name === 'NotAllowedError') return '마이크 사용 권한이 거부되었습니다. 주소창의 사이트 권한에서 마이크를 허용한 뒤 다시 시도해 주세요.';
+    if (name === 'NotFoundError') return '사용 가능한 마이크를 찾지 못했습니다.';
+    if (name === 'NotReadableError') return '다른 앱이 마이크를 사용 중일 수 있습니다. 다른 앱의 마이크 사용을 종료한 뒤 다시 시도해 주세요.';
+    return '마이크를 시작하지 못했습니다: ' + (err && err.message ? err.message : String(err));
+  }
+
+  function showError(msg){ errorBox.textContent=msg; errorBox.style.display='block'; status.textContent='녹음을 시작할 수 없습니다.'; }
+  function clearError(){ errorBox.textContent=''; errorBox.style.display='none'; }
+})();
+</script>
+</body>
+</html>
